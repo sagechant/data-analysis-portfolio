@@ -1,0 +1,420 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import sys # Import sys for exit
+
+# --- CONFIGURATION ---
+video_path = 'C:/Users/Arun/Downloads/PhD/Manuscript/TIRF LIVE IMAGING/VIM_FAK_FA1.mp4'
+use_interactive_roi = True # Set to True to use interactive, False for predefined below
+# Predefined ROIs (only used if use_interactive_roi = False) - Ensure these are valid for your video dimensions
+predefined_rois = [(290, 300, 40, 30), (350, 310, 40, 30)]
+
+# Processing parameters
+adaptive_threshold_method = cv2.ADAPTIVE_THRESH_GAUSSIAN_C
+adaptive_threshold_block_size = 11  # Must be odd
+adaptive_threshold_constant = 2
+smooth_window = 5
+
+# --- Globals for Mouse Callback (if using interactive mode) ---
+# Define them here at the module level so 'global' keyword works reliably
+rois_being_drawn = []
+current_roi_start = None
+is_drawing = False
+frame_display_base = None
+frame_copy_dynamic = None
+# --- End Globals ---
+
+# --- INITIALIZATION ---
+print(f"Checking video file: {video_path}")
+if not os.path.exists(video_path):
+    print(f"Error: Video file not found at '{video_path}'")
+    sys.exit() # Use sys.exit() for cleaner exit
+
+print("Opening video capture...")
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    print(f"Error: Could not open video file '{video_path}'")
+    sys.exit()
+
+frame_rate = cap.get(cv2.CAP_PROP_FPS)
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+print(f"Video Frame Rate: {frame_rate:.2f} FPS, Resolution: {frame_width}x{frame_height}")
+
+# Define rois variable here; it will be overwritten by interactive selection if enabled
+rois = predefined_rois
+
+# --- Define Mouse Callback Function (now at module level) ---
+# This function will modify the global variables defined above
+def mouse_callback_roi_user(event, x, y, flags, param):
+    # Declare intention to use global variables
+    global is_drawing, current_roi_start, rois_being_drawn, frame_display_base, frame_copy_dynamic
+
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # Reset dynamic copy and start drawing
+        if frame_display_base is not None: # Ensure base frame exists
+             frame_copy_dynamic = frame_display_base.copy()
+             is_drawing = True
+             current_roi_start = (x, y)
+        else:
+             print("Error: Base frame not initialized for drawing.")
+
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if is_drawing and frame_display_base is not None:
+            # Draw the dynamic rectangle on the temporary copy
+            frame_copy_dynamic = frame_display_base.copy() # Re-copy base to clear old green box
+            cv2.rectangle(frame_copy_dynamic, current_roi_start, (x, y), (0, 255, 0), 1) # Green dynamic box
+            cv2.imshow(window_name_roi, frame_copy_dynamic) # window_name_roi needs to be accessible or passed
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        if is_drawing and frame_display_base is not None:
+            is_drawing = False
+            x1, y1 = current_roi_start
+            x2, y2 = x, y
+            roi_x, roi_y = min(x1, x2), min(y1, y2)
+            roi_w, roi_h = abs(x1 - x2), abs(y1 - y2)
+
+            if roi_w > 0 and roi_h > 0:
+                new_roi = (roi_x, roi_y, roi_w, roi_h)
+                rois_being_drawn.append(new_roi)
+                print(f"ROI defined: {new_roi}")
+                # Draw confirmed ROI onto the base display frame
+                cv2.rectangle(frame_display_base, (roi_x, roi_y), (roi_x + roi_w, roi_y + roi_h), (0, 0, 255), 2) # Red box
+                cv2.imshow(window_name_roi, frame_display_base)
+            else:
+                print("Warning: ROI ignored (zero width/height).")
+                cv2.imshow(window_name_roi, frame_display_base) # Show base frame without the invalid box
+        current_roi_start = None # Reset start point
+# --- End Mouse Callback Definition ---
+
+
+# --- ROI SELECTION ---
+if use_interactive_roi:
+    print("Attempting interactive ROI selection...")
+    ret, frame = cap.read() # Read the first frame
+    if not ret:
+        print("Error: Could not read the first frame for ROI selection.")
+        cap.release()
+        sys.exit()
+
+    # Initialize global variables needed for drawing
+    rois_being_drawn = [] # Reset list for this selection session
+    frame_display_base = frame.copy()
+    frame_copy_dynamic = frame.copy()
+
+    # Define window name globally or ensure it's accessible
+    window_name_roi = "Define ROIs (Drag Mouse; ENTER/s=Save, ESC/q=Cancel)"
+    cv2.namedWindow(window_name_roi)
+
+    # Attach the callback function (now defined globally) to the window
+    cv2.setMouseCallback(window_name_roi, mouse_callback_roi_user)
+
+    print("\n--- Interactive ROI Selection ---")
+    print("INSTRUCTIONS:")
+    print(" - Click and DRAG mouse on the window to draw an ROI.")
+    print(" - RELEASE mouse button to finalize the current ROI (red box).")
+    print(" - Draw multiple ROIs if needed.")
+    print(" - Press ENTER or 's' to SAVE all drawn ROIs and continue.")
+    print(" - Press ESC or 'q' to CANCEL selection (discards all ROIs).")
+
+    # Main loop for interactive ROI selection window
+    while True:
+        cv2.imshow(window_name_roi, frame_display_base) # Display base frame with red boxes
+        key = cv2.waitKey(20) & 0xFF
+
+        # Check for SAVE keys (Enter=13)
+        if key == 13 or key == ord('s'):
+            if not rois_being_drawn:
+                print("Warning: No ROIs were selected. Exiting.")
+                cap.release()
+                cv2.destroyAllWindows()
+                sys.exit()
+            print(f"Saving {len(rois_being_drawn)} ROIs: {rois_being_drawn}")
+            rois = rois_being_drawn # Overwrite the main 'rois' variable
+            break
+
+        # Check for CANCEL keys (ESC=27)
+        elif key == 27 or key == ord('q'):
+            print("ROI selection cancelled. Exiting.")
+            cap.release()
+            cv2.destroyAllWindows()
+            sys.exit()
+
+    # Clean up ROI selection window
+    cv2.destroyAllWindows()
+    for _ in range(5): cv2.waitKey(1)
+
+    # Re-open video capture to start processing from the beginning
+    print("Re-opening video capture for processing...")
+    cap.release()
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Error: Could not re-open video file '{video_path}' for processing.")
+        sys.exit()
+
+# --- End of 'if use_interactive_roi' block ---
+
+# Check if ROIs are valid before proceeding
+elif not rois: # Handle case where predefined list might be empty and interactive was False
+     print("Error: No ROIs defined (predefined list is empty and interactive mode was off).")
+     sys.exit()
+else: # Use predefined ROIs (if use_interactive_roi was False)
+    print(f"Using {len(rois)} predefined ROIs: {rois}")
+
+# --- Initialize Data Storage ---
+num_rois = len(rois)
+if num_rois == 0:
+    print("Error: ROI list is empty after selection/definition step.")
+    sys.exit()
+
+vimentin_intensity = [[] for _ in range(num_rois)]
+fak_intensity = [[] for _ in range(num_rois)]
+fak_area = [[] for _ in range(num_rois)]
+print(f"Initialized data storage for {num_rois} ROIs.")
+
+# --- PROCESSING VIDEO FRAMES ---
+print("Starting frame processing loop...")
+frame_counter = 0
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        # print(f"\nEnd of video or error reading frame after {frame_counter} frames.") # Less verbose end
+        break
+
+    frame_counter += 1
+
+    for i, roi_coords in enumerate(rois):
+        x, y, w, h = roi_coords # Unpack ROI coordinates
+        # Validate ROI bounds
+        x, y = max(0, x), max(0, y)
+        w = min(w, frame_width - x)
+        h = min(h, frame_height - y)
+
+        if w <= 0 or h <= 0:
+            vimentin_intensity[i].append(np.nan)
+            fak_intensity[i].append(np.nan)
+            fak_area[i].append(0)
+            continue
+
+        roi_frame = frame[y:y+h, x:x+w]
+        if roi_frame.size == 0:
+             vimentin_intensity[i].append(np.nan)
+             fak_intensity[i].append(np.nan)
+             fak_area[i].append(0)
+             continue
+
+        # Channel processing (BGR order: Blue=0, Green=1, Red=2)
+        red = roi_frame[:, :, 2]   # Vimentin
+        green = roi_frame[:, :, 1] # FAK
+        vimentin_intensity[i].append(np.mean(red) if red.size > 0 else np.nan)
+        fak_intensity[i].append(np.mean(green) if green.size > 0 else np.nan)
+
+        # FAK area calculation
+        if green.size > 0:
+            try:
+                # Ensure green channel is 8-bit single channel for adaptiveThreshold
+                if green.dtype != np.uint8:
+                    # Attempt conversion if possible, might need normalization first
+                     green_norm = cv2.normalize(green, None, 0, 255, cv2.NORM_MINMAX)
+                     # Check if normalization resulted in a valid array before converting type
+                     if green_norm is not None and green_norm.size > 0:
+                         green_uint8 = green_norm.astype(np.uint8)
+                     else:
+                         raise ValueError("Normalization failed or resulted in empty array")
+                else:
+                    green_uint8 = green # Already uint8
+
+                thresh = cv2.adaptiveThreshold(green_uint8, 255, adaptive_threshold_method,
+                                                cv2.THRESH_BINARY_INV, adaptive_threshold_block_size,
+                                                adaptive_threshold_constant)
+                fak_area[i].append(np.sum(thresh == 255))
+            except (cv2.error, ValueError) as e:
+                # print(f"Warning: Error during adaptiveThreshold on frame {frame_counter}, ROI {i+1}: {e}")
+                fak_area[i].append(0)
+        else:
+             fak_area[i].append(0)
+
+    if frame_counter % 100 == 0:
+        print(f"Processed frame {frame_counter}...")
+
+
+print(f"Finished processing {frame_counter} frames.")
+cap.release()
+
+# --- Data Integrity Check ---
+if not any(vimentin_intensity) or not any(fak_intensity):
+    print("Error: No intensity data was collected. Check ROI validity and processing loop.")
+    sys.exit()
+# Calculate min_len based on actual collected data, ignoring potential initial empty lists
+min_len = 0
+try:
+    # Ensure lists being checked are not None before calling len
+    all_lists = [lst for lst in vimentin_intensity + fak_intensity + fak_area if lst is not None]
+    if not all_lists: # Check if all lists were None or empty initially
+        raise ValueError("No valid data lists found.")
+    min_len = min(len(lst) for lst in all_lists)
+except ValueError: # Handles case where all lists might be empty or None
+     print("Error: All data lists appear empty after processing.")
+     sys.exit()
+
+if min_len == 0:
+    print("Error: Minimum data list length is zero after processing.")
+    sys.exit()
+print(f"Collected data points per ROI: {min_len}")
+
+
+# --- NORMALIZATION ---
+print("Normalizing data...")
+normalized_vimentin_intensity = []
+normalized_fak_intensity = []
+for i in range(num_rois):
+    # Ensure list exists and has expected length before processing
+    vim_data_roi = vimentin_intensity[i][:min_len] if vimentin_intensity[i] is not None else []
+    fak_data_roi = fak_intensity[i][:min_len] if fak_intensity[i] is not None else []
+
+    vim_valid_data = [v for v in vim_data_roi if v is not None and not np.isnan(v)]
+    fak_valid_data = [f for f in fak_data_roi if f is not None and not np.isnan(f)]
+
+    max_vim = max(vim_valid_data) if vim_valid_data else 1.0
+    max_fak = max(fak_valid_data) if fak_valid_data else 1.0
+    max_vim = max(max_vim, 1.0) # Ensure max is at least 1.0
+    max_fak = max(max_fak, 1.0)
+
+    normalized_vimentin_intensity.append([(val / max_vim) if val is not None and not np.isnan(val) else np.nan for val in vim_data_roi])
+    normalized_fak_intensity.append([(val / max_fak) if val is not None and not np.isnan(val) else np.nan for val in fak_data_roi])
+
+# --- SMOOTHING ---
+print("Smoothing data...")
+def smooth(data, window):
+    """Applies convolution smoothing, handling NaNs by interpolation."""
+    if not data: # Handle empty list case
+        return []
+    data_arr = np.array(data, dtype=float) # Ensure float type
+    nan_mask = np.isnan(data_arr)
+
+    # Interpolate NaNs before smoothing if possible
+    try:
+        if np.any(nan_mask) and not np.all(nan_mask): # Check if there are NaNs and also some valid numbers
+             indices = np.arange(len(data_arr))
+             # Only interpolate using valid (non-NaN) points
+             valid_indices = indices[~nan_mask]
+             valid_data = data_arr[~nan_mask]
+             if len(valid_indices) > 0: # Need at least one valid point to interpolate
+                 data_arr[nan_mask] = np.interp(indices[nan_mask], valid_indices, valid_data)
+             else: # All values were NaN
+                  data_arr.fill(0) # Fill with 0 if no valid points exist
+        elif np.all(nan_mask): # Handle case where all values are NaN
+             data_arr.fill(0)
+    except Exception as e:
+         # If interpolation fails, just replace NaNs with 0 for convolution
+         # print(f"Warning: Interpolation failed during smoothing: {e}. Replacing NaNs with 0.")
+         data_arr[np.isnan(data_arr)] = 0 # Ensure any remaining NaNs become 0
+
+    # Apply convolution
+    smoothed_data = np.convolve(data_arr, np.ones(window)/window, mode='same')
+
+    # Optionally, re-apply NaNs if you don't want interpolated values in the output
+    # smoothed_data[nan_mask] = np.nan
+
+    return smoothed_data.tolist()
+
+
+# --- PLOTTING ---
+print("Generating plots...")
+for i in range(num_rois):
+    # Check if data lists exist and have enough length
+    if i < len(vimentin_intensity) and i < len(fak_intensity) and \
+       i < len(normalized_vimentin_intensity) and i < len(normalized_fak_intensity) and \
+       i < len(fak_area):
+
+        vim_int_plot = vimentin_intensity[i][:min_len]
+        fak_int_plot = fak_intensity[i][:min_len]
+        norm_vim_plot = normalized_vimentin_intensity[i][:min_len]
+        norm_fak_plot = normalized_fak_intensity[i][:min_len]
+        fak_area_plot = fak_area[i][:min_len]
+
+        # Check if lists are empty before smoothing/plotting
+        if not vim_int_plot or not fak_int_plot or not norm_vim_plot or \
+           not norm_fak_plot or not fak_area_plot:
+            print(f"Warning: Skipping plot for ROI {i+1} due to empty data lists.")
+            continue
+
+        plt.figure(figsize=(12, 8))
+
+        plt.subplot(3, 1, 1)
+        plt.plot(smooth(vim_int_plot, smooth_window), label='Vimentin', color='red')
+        plt.plot(smooth(fak_int_plot, smooth_window), label='FAK', color='green')
+        plt.title(f'ROI {i+1}: Intensity & Area Over Time')
+        plt.ylabel('Smoothed Intensity')
+        plt.legend()
+        plt.grid(True)
+
+        plt.subplot(3, 1, 2)
+        plt.plot(smooth(norm_vim_plot, smooth_window), label='Norm. Vimentin', color='red')
+        plt.plot(smooth(norm_fak_plot, smooth_window), label='Norm. FAK', color='green')
+        plt.ylabel('Normalized Intensity (0-1)')
+        plt.legend()
+        plt.grid(True)
+
+        plt.subplot(3, 1, 3)
+        plt.plot(smooth(fak_area_plot, smooth_window), label='FAK Area', color='blue')
+        plt.xlabel('Frame')
+        plt.ylabel('Smoothed Area (Pixels)')
+        plt.legend()
+        plt.grid(True)
+
+        plt.tight_layout()
+        plt.show() # Display the plot
+    else:
+        print(f"Warning: Skipping plot for ROI {i+1} due to index out of range (data lists might be inconsistent).")
+
+
+# --- EXPORT TO CSV ---
+print("Exporting data to CSV...")
+frames = min_len # Use the minimum consistent length
+data = {'Frame': list(range(1, frames + 1))} # Frame numbers start from 1
+
+export_successful = True
+try:
+    for i in range(num_rois):
+        # Ensure lists exist and slice to the minimum consistent length
+        data[f'ROI{i+1}_Vimentin_Intensity'] = vimentin_intensity[i][:frames] if i < len(vimentin_intensity) and vimentin_intensity[i] is not None else [np.nan] * frames
+        data[f'ROI{i+1}_FAK_Intensity'] = fak_intensity[i][:frames] if i < len(fak_intensity) and fak_intensity[i] is not None else [np.nan] * frames
+        data[f'ROI{i+1}_FAK_Area_Pixels'] = fak_area[i][:frames] if i < len(fak_area) and fak_area[i] is not None else [0] * frames # Use 0 for area if missing
+        data[f'ROI{i+1}_Norm_Vimentin'] = normalized_vimentin_intensity[i][:frames] if i < len(normalized_vimentin_intensity) and normalized_vimentin_intensity[i] is not None else [np.nan] * frames
+        data[f'ROI{i+1}_Norm_FAK'] = normalized_fak_intensity[i][:frames] if i < len(normalized_fak_intensity) and normalized_fak_intensity[i] is not None else [np.nan] * frames
+
+    df = pd.DataFrame(data)
+    # --- CORRECTED CSV PATH LINE ---
+    csv_output_path = 'C:/Users/Arun/Downloads/PhD/Manuscript/TIRF LIVE IMAGING/Python Analysis Results/FAK_VIM_ROI_Tracking.csv'
+    df.to_csv(csv_output_path, index=False)
+    print(f"✅ Data successfully exported to {csv_output_path}")
+
+except Exception as e:
+    print(f"\nError constructing DataFrame or exporting data to CSV: {e}")
+    print("Please check data consistency and file path permissions.")
+    export_successful = False
+
+if not export_successful:
+     # Optional: Try saving raw lists if DataFrame fails
+     try:
+         raw_data_dict = {
+             'vimentin_intensity': vimentin_intensity,
+             'fak_intensity': fak_intensity,
+             'fak_area': fak_area
+             # Add others if needed
+         }
+         fallback_path = 'C:/Users/Arun/Downloads/PhD/Manuscript/TIRF LIVE IMAGING/Python Analysis Results/FALLBACK_RAW_DATA.json'
+         import json
+         with open(fallback_path, 'w') as f:
+             # Convert numpy types to standard types for JSON
+             json.dump(raw_data_dict, f, default=lambda x: int(x) if isinstance(x, np.integer) else float(x) if isinstance(x, np.floating) else None if np.isnan(x) else x)
+         print(f"⚠️ DataFrame export failed. Saved raw data lists to {fallback_path}")
+     except Exception as json_e:
+         print(f"Failed to save fallback raw data: {json_e}")
+
+
+print("\nScript finished.")
+
